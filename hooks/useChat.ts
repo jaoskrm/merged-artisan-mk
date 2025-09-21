@@ -12,24 +12,26 @@ export const useChat = () => {
     {
       id: '1',
       role: 'assistant',
-      content: `Hello! I'm your multilingual AI assistant for the Artisans Marketplace. I can help you with:
+      content: `Hello! I'm your multilingual AI assistant for the Artisans Marketplace. 
 
-🎨 Marketing your artwork and crafts
-📝 Creating compelling product descriptions  
-📸 Photography tips for better product images
-💰 Pricing strategies for handmade items
-📱 Digital marketing and social media advice
-🛍️ Platform navigation and features
-📦 Business tips from packaging to customer service
+I can help you with:
+🎨 **Creating Product Listings** - Navigate to the "For Artists" page and use our AI listing creation tool
+📸 **Photography tips** for better product images  
+💰 **Pricing strategies** for handmade items
+📱 **Digital marketing** and social media advice
+🚀 **Platform navigation** and features
+📦 **Business tips** from packaging to customer service
 
-How can I help you grow your artisan business today?`,
+**Quick Start**: Ask me "How do I create a product listing in this website?" for step-by-step guidance!
+
+I speak 16 languages fluently and will respond in the same language you use. How can I help you grow your artisan business today?`,
       timestamp: new Date(),
     },
   ]);
   const [isLoading, setIsLoading] = useState(false);
 
-  const sendMessage = useCallback(async (content: string) => {
-    if (!content.trim()) return;
+  const sendMessage = useCallback(async (content: string): Promise<string | null> => {
+    if (!content.trim()) return null;
 
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -111,6 +113,7 @@ How can I help you grow your artisan business today?`,
       };
 
       setMessages(prev => [...prev, assistantMessage]);
+      return assistantContent;
 
     } catch (error) {
       console.error('💥 Chat error details:', error);
@@ -121,15 +124,7 @@ How can I help you grow your artisan business today?`,
         if (error.name === 'AbortError') {
           errorMessage += 'The request timed out. Please try again.';
         } else if (error.message.includes('Failed to fetch')) {
-          errorMessage += `Connection failed. Please check:
-
-🔧 **Troubleshooting:**
-• Is your development server running? (\`npm run dev\`)
-• Is the API endpoint /api/chat accessible?
-• Check your network connection
-• Try refreshing the page
-
-**Technical Error:** ${error.message}`;
+          errorMessage += `Connection failed. Please check:\n\n🔧 **Troubleshooting:**\n• Is your development server running? (\`npm run dev\`)\n• Is the API endpoint /api/chat accessible?\n• Check your network connection\n• Try refreshing the page\n\n**Technical Error:** ${error.message}`;
         } else if (error.message.includes('API Error:')) {
           errorMessage += `Server error: ${error.message}`;
         } else {
@@ -146,6 +141,7 @@ How can I help you grow your artisan business today?`,
         timestamp: new Date(),
       };
       setMessages(prev => [...prev, errorResponse]);
+      return null;
     } finally {
       setIsLoading(false);
     }
@@ -155,7 +151,19 @@ How can I help you grow your artisan business today?`,
     setMessages([{
       id: '1',
       role: 'assistant',
-      content: `Hello! I'm your multilingual AI assistant for the Artisans Marketplace. How can I help you today?`,
+      content: `Hello! I'm your multilingual AI assistant for the Artisans Marketplace. 
+
+I can help you with:
+🎨 **Creating Product Listings** - Navigate to the "For Artists" page and use our AI listing creation tool
+📸 **Photography tips** for better product images  
+💰 **Pricing strategies** for handmade items
+📱 **Digital marketing** and social media advice
+🚀 **Platform navigation** and features
+📦 **Business tips** from packaging to customer service
+
+**Quick Start**: Ask me "How do I create a product listing in this website?" for step-by-step guidance!
+
+I speak 16 languages fluently and will respond in the same language you use. How can I help you grow your artisan business today?`,
       timestamp: new Date(),
     }]);
   }, []);

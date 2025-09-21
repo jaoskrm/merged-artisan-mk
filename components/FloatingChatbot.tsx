@@ -2,12 +2,40 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useChat } from '../hooks/useChat';
+import { useButtonHighlight } from '../hooks/useButtonHighlight';
 
 // Enhanced TS helpers for Web Speech API
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message?: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  start(): void;
+  stop(): void;
+  onstart: ((this: SpeechRecognition, ev: Event) => any) | null;
+  onend: ((this: SpeechRecognition, ev: Event) => any) | null;
+  onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null;
+  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any) | null;
+}
+
 declare global {
   interface Window {
-    webkitSpeechRecognition?: any;
-    SpeechRecognition?: any;
+    webkitSpeechRecognition?: {
+      new (): SpeechRecognition;
+    };
+    SpeechRecognition?: {
+      new (): SpeechRecognition;
+    };
   }
 }
 
@@ -17,12 +45,13 @@ const FloatingChatbot = () => {
   const { messages, isLoading, sendMessage, clearChat, dictateToChat } = useChat();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const { highlightButton, highlightMultipleButtons, startInteractiveGuide } = useButtonHighlight();
 
   // Voice recognition states
   const [isRecording, setIsRecording] = useState(false);
   const [isVoiceSupported, setIsVoiceSupported] = useState(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
   const [recLang, setRecLang] = useState('en-IN');
   const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
 
@@ -59,13 +88,95 @@ const FloatingChatbot = () => {
     };
   }, []);
 
+  // Process AI response for button highlighting
+// Process AI response for button highlighting
+const processAIResponse = useCallback((content: string) => {
+  // Check if the response contains button highlighting instructions
+  const buttonHighlightRegex = /\[HIGHLIGHT_BUTTON:([^\]]+)\]/g;
+  const multiHighlightRegex = /\[HIGHLIGHT_SEQUENCE:([^\]]+)\]/g;
+  const interactiveGuideRegex = /\[INTERACTIVE_GUIDE:([^\]]+)\]/g;
+  
+  let processedContent = content;
+  let hasInteractiveGuide = false;
+  
+  // Process interactive guides first (highest priority)
+  let match;
+  while ((match = interactiveGuideRegex.exec(content)) !== null) {
+    const [fullMatch, instruction] = match;
+    hasInteractiveGuide = true;
+    
+    const steps = instruction.split(';').map(step => {
+      const [selector, message, delay] = step.split('|');
+      return {
+        selector: selector.trim(),
+        message: message?.trim() || 'Click here',
+        delay: parseInt(delay?.trim()) || 1000
+      };
+    });
+    
+    // Start interactive guide
+    setTimeout(() => {
+      startInteractiveGuide(steps);
+    }, 1000);
+    
+    // Remove the instruction from the content
+    processedContent = processedContent.replace(fullMatch, '');
+  }
+  
+  // Only process other highlighting if no interactive guide is present
+  if (!hasInteractiveGuide) {
+    // Process single button highlights
+    while ((match = buttonHighlightRegex.exec(content)) !== null) {
+      const [fullMatch, instruction] = match;
+      const [selector, message] = instruction.split('|');
+      
+      // Trigger highlight after a short delay
+      setTimeout(() => {
+        highlightButton(selector.trim(), { message: message?.trim() || 'Click here' });
+      }, 1000);
+      
+      // Remove the instruction from the content
+      processedContent = processedContent.replace(fullMatch, '');
+    }
+    
+    // Process multiple button highlight sequences
+    while ((match = multiHighlightRegex.exec(content)) !== null) {
+      const [fullMatch, instruction] = match;
+      const buttons = instruction.split(';').map(btn => {
+        const [selector, message, delay] = btn.split('|');
+        return {
+          selector: selector.trim(),
+          message: message?.trim() || 'Click here',
+          delay: parseInt(delay?.trim()) || 0
+        };
+      });
+      
+      // Trigger highlight sequence after a short delay
+      setTimeout(() => {
+        highlightMultipleButtons(buttons);
+      }, 1000);
+      
+      // Remove the instruction from the content
+      processedContent = processedContent.replace(fullMatch, '');
+    }
+  }
+  
+  return processedContent;
+}, [highlightButton, highlightMultipleButtons, startInteractiveGuide]);
+
+
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputValue.trim() || isLoading) return;
 
     const message = inputValue;
     setInputValue('');
-    await sendMessage(message);
+    
+    // Send message and process response for highlighting
+    const response = await sendMessage(message);
+    if (response) {
+      processAIResponse(response);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
@@ -104,7 +215,7 @@ const FloatingChatbot = () => {
       'hi-IN': { name: 'हिंदी', flag: '🇮🇳', region: 'India' },
       'ta-IN': { name: 'தமிழ்', flag: '🇮🇳', region: 'India' },
       'bn-IN': { name: 'বাংলা', flag: '🇮🇳', region: 'India' },
-      'te-IN': { name: 'తెలుగు', flag: '🇮🇳', region: 'India' },
+      'te-IN': { name: 'తెలుগు', flag: '🇮🇳', region: 'India' },
       'mr-IN': { name: 'मराठी', flag: '🇮🇳', region: 'India' },
       'gu-IN': { name: 'ગુજરાતી', flag: '🇮🇳', region: 'India' },
       'kn-IN': { name: 'ಕನ್ನಡ', flag: '🇮🇳', region: 'India' },
@@ -120,134 +231,117 @@ const FloatingChatbot = () => {
     return langMap[langCode] || { name: langCode, flag: '🌐', region: 'Global' };
   };
 
-  // Enhanced speech recognition with better error handling
-  const startDictation = async () => {
+  // Voice recognition setup
+  const startVoiceRecognition = async () => {
     if (!isVoiceSupported) {
-      alert('Speech recognition is not supported in this browser. Please try Chrome or Edge.');
+      alert('Voice recognition is not supported in your browser.');
       return;
     }
 
-    // Check permission first
-    if (hasPermission === null || hasPermission === false) {
+    if (hasPermission === null) {
       const granted = await requestMicPermission();
-      if (!granted) {
-        alert('Microphone permission is required for voice input. Please enable it in your browser settings.');
-        return;
-      }
+      if (!granted) return;
+    }
+
+    if (hasPermission === false) {
+      alert('Microphone permission is required for voice input.');
+      return;
     }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
     const recognition = new SpeechRecognition();
     
+    recognition.continuous = false;
+    recognition.interimResults = false;
     recognition.lang = recLang;
-    recognition.continuous = true;
-    recognition.interimResults = true;
     recognition.maxAlternatives = 1;
-
-    let finalTranscript = '';
-    let timeoutId: NodeJS.Timeout;
 
     recognition.onstart = () => {
       setIsRecording(true);
-      console.log(`Voice recognition started in ${recLang}`);
+      console.log(`🎤 Voice recognition started (${recLang})`);
+    };
+
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const transcript = event.results[0][0].transcript;
+      const confidence = event.results[0][0].confidence;
+      
+      console.log(`🎤 Voice input: "${transcript}" (confidence: ${confidence})`);
+      setInputValue(transcript);
+      
+      // Auto-detect language from speech result
+      if (confidence > 0.7) {
+        setDetectedLanguage(recLang);
+      }
+    };
+
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      console.error('🎤 Voice recognition error:', event.error);
+      setIsRecording(false);
+      
+      let errorMessage = 'Voice recognition failed: ';
+      switch (event.error) {
+        case 'no-speech':
+          errorMessage += 'No speech detected. Please try again.';
+          break;
+        case 'audio-capture':
+          errorMessage += 'Audio capture failed. Check your microphone.';
+          break;
+        case 'not-allowed':
+          errorMessage += 'Microphone permission denied.';
+          setHasPermission(false);
+          break;
+        default:
+          errorMessage += event.error;
+      }
+      alert(errorMessage);
     };
 
     recognition.onend = () => {
       setIsRecording(false);
-      console.log('Voice recognition ended');
-    };
-
-    recognition.onerror = (event: any) => {
-      setIsRecording(false);
-      console.error('Speech recognition error:', event);
-      
-      let errorMessage = 'Voice recognition error occurred.';
-      switch (event.error) {
-        case 'network':
-          errorMessage = 'Network error during voice recognition.';
-          break;
-        case 'not-allowed':
-          errorMessage = 'Microphone access denied. Please enable microphone permissions.';
-          setHasPermission(false);
-          break;
-        case 'no-speech':
-          errorMessage = 'No speech detected. Please try again.';
-          break;
-        case 'audio-capture':
-          errorMessage = 'No microphone found. Please check your audio devices.';
-          break;
-        case 'language-not-supported':
-          errorMessage = `Language ${recLang} not supported. Try switching to English.`;
-          break;
-      }
-      
-      if (event.error !== 'aborted') {
-        alert(errorMessage);
-      }
-    };
-
-    recognition.onresult = (event: any) => {
-      clearTimeout(timeoutId);
-      let interimTranscript = '';
-      
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const transcript = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          finalTranscript += transcript + ' ';
-        } else {
-          interimTranscript += transcript;
-        }
-      }
-
-      // Show interim results in input field without overriding user input
-      if (inputRef.current && interimTranscript && !inputValue) {
-        inputRef.current.value = interimTranscript;
-      }
-
-      // Process final transcript
-      if (finalTranscript.trim()) {
-        const cleanTranscript = finalTranscript.trim();
-        console.log(`Final transcript (${recLang}):`, cleanTranscript);
-        
-        // Clear the input field and send the message
-        if (inputRef.current) {
-          inputRef.current.value = '';
-        }
-        setInputValue('');
-        
-        // Send through dictateToChat
-        dictateToChat(cleanTranscript);
-        finalTranscript = '';
-      }
-
-      // Auto-stop after 3 seconds of no speech
-      timeoutId = setTimeout(() => {
-        if (recognitionRef.current) {
-          recognitionRef.current.stop();
-        }
-      }, 3000);
+      console.log('🎤 Voice recognition ended');
     };
 
     recognitionRef.current = recognition;
-    
-    try {
-      recognition.start();
-    } catch (error) {
-      console.error('Failed to start recognition:', error);
-      setIsRecording(false);
-    }
+    recognition.start();
   };
 
-  const stopDictation = () => {
+  const stopVoiceRecognition = () => {
     if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (error) {
-        console.error('Error stopping recognition:', error);
-      }
+      recognitionRef.current.stop();
     }
     setIsRecording(false);
   };
+
+  const toggleVoiceRecognition = () => {
+    if (isRecording) {
+      stopVoiceRecognition();
+    } else {
+      startVoiceRecognition();
+    }
+  };
+
+  // Available voice recognition languages
+  const getVoiceRecognitionLanguages = () => [
+    { code: 'en-IN', name: 'English (India)', flag: '🇮🇳' },
+    { code: 'en-US', name: 'English (US)', flag: '🇺🇸' },
+    { code: 'hi-IN', name: 'हिंदी', flag: '🇮🇳' },
+    { code: 'ta-IN', name: 'தமிழ்', flag: '🇮🇳' },
+    { code: 'bn-IN', name: 'বাংলা', flag: '🇮🇳' },
+    { code: 'te-IN', name: 'తెలుగు', flag: '🇮🇳' },
+    { code: 'mr-IN', name: 'मराठी', flag: '🇮🇳' },
+    { code: 'gu-IN', name: 'ગુજરાતી', flag: '🇮🇳' },
+    { code: 'kn-IN', name: 'ಕನ್ನಡ', flag: '🇮🇳' },
+    { code: 'ml-IN', name: 'മലയാളം', flag: '🇮🇳' },
+    { code: 'pa-IN', name: 'ਪੰਜਾਬੀ', flag: '🇮🇳' },
+    { code: 'ur-IN', name: 'اردو', flag: '🇮🇳' },
+    { code: 'fr-FR', name: 'Français', flag: '🇫🇷' },
+    { code: 'de-DE', name: 'Deutsch', flag: '🇩🇪' },
+    { code: 'es-ES', name: 'Español', flag: '🇪🇸' },
+    { code: 'pt-PT', name: 'Português', flag: '🇵🇹' },
+    { code: 'it-IT', name: 'Italiano', flag: '🇮🇹' }
+  ];
 
   return (
     <>
@@ -361,124 +455,88 @@ const FloatingChatbot = () => {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Enhanced Input + Controls */}
-          <form onSubmit={handleSend} className="p-4 border-t border-stone-200 dark:border-neutral-800">
-            {/* Enhanced Voice Controls */}
+          {/* Enhanced Input Section */}
+          <div className="border-t border-stone-200 dark:border-neutral-800 p-4">
+            {/* Voice Recognition Language Selector */}
             {isVoiceSupported && (
-              <div className="flex items-center gap-2 mb-3">
-                <div className="flex items-center gap-2 flex-1">
-                  <span className="text-xs text-neutral-600 dark:text-neutral-400 min-w-fit">🗣️ Voice:</span>
-                  <select
-                    value={recLang}
-                    onChange={(e) => setRecLang(e.target.value)}
-                    className="flex-1 px-2 py-1 border border-stone-300 dark:border-neutral-600 rounded-lg text-xs bg-white dark:bg-neutral-800 min-w-0"
-                    disabled={isRecording}
-                  >
-                    <optgroup label="🇮🇳 Indian Languages">
-                      <option value="en-IN">🇮🇳 English (India)</option>
-                      <option value="hi-IN">🇮🇳 हिंदी Hindi</option>
-                      <option value="ta-IN">🇮🇳 தமிழ் Tamil</option>
-                      <option value="bn-IN">🇮🇳 বাংলা Bengali</option>
-                      <option value="te-IN">🇮🇳 తెలుగు Telugu</option>
-                      <option value="mr-IN">🇮🇳 मराठी Marathi</option>
-                      <option value="gu-IN">🇮🇳 ગુજરાતી Gujarati</option>
-                      <option value="kn-IN">🇮🇳 ಕನ್ನಡ Kannada</option>
-                      <option value="ml-IN">🇮🇳 മലയാളം Malayalam</option>
-                      <option value="pa-IN">🇮🇳 ਪੰਜਾਬੀ Punjabi</option>
-                      <option value="ur-IN">🇮🇳 اردو Urdu</option>
-                    </optgroup>
-                    <optgroup label="🌍 International">
-                      <option value="en-US">🇺🇸 English (US)</option>
-                      <option value="fr-FR">🇫🇷 Français</option>
-                      <option value="de-DE">🇩🇪 Deutsch</option>
-                      <option value="es-ES">🇪🇸 Español</option>
-                      <option value="pt-PT">🇵🇹 Português</option>
-                      <option value="it-IT">🇮🇹 Italiano</option>
-                    </optgroup>
-                  </select>
-                </div>
-                {isRecording && (
-                  <div className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
-                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                    <span>Listening...</span>
-                  </div>
+              <div className="mb-3">
+                <select
+                  value={recLang}
+                  onChange={(e) => setRecLang(e.target.value)}
+                  className="text-xs bg-stone-50 dark:bg-neutral-800 border border-stone-200 dark:border-neutral-700 rounded-lg px-2 py-1 text-neutral-700 dark:text-neutral-300 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                >
+                  {getVoiceRecognitionLanguages().map(lang => (
+                    <option key={lang.code} value={lang.code}>
+                      {lang.flag} {lang.name}
+                    </option>
+                  ))}
+                </select>
+                {detectedLanguage && (
+                  <span className="ml-2 text-xs text-primary">
+                    🎯 {getLanguageInfo(detectedLanguage).name}
+                  </span>
                 )}
               </div>
             )}
-            
-            <div className="flex gap-2">
-              <input
-                ref={inputRef}
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="🌐 Type in any language or use voice input..."
-                className="flex-1 px-3 py-2 border border-stone-300 dark:border-neutral-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 text-sm"
-                disabled={isLoading}
-              />
-              
-              {/* Enhanced Voice Button */}
-              {isVoiceSupported && (
-                <button
-                  type="button"
-                  onClick={() => (isRecording ? stopDictation() : startDictation())}
-                  className={`px-3 py-2 rounded-xl border transition-all duration-200 ${
-                    isRecording 
-                      ? 'bg-red-500 text-white border-red-500 animate-pulse shadow-lg' 
-                      : 'border-stone-300 dark:border-neutral-600 text-neutral-700 dark:text-neutral-300 hover:bg-stone-50 dark:hover:bg-neutral-800 hover:scale-105'
-                  }`}
-                  title={isRecording ? `Stop recording (${getLanguageInfo(recLang).name})` : `Start voice input (${getLanguageInfo(recLang).name})`}
+
+            <form onSubmit={handleSend} className="flex gap-2">
+              <div className="flex-1 relative">
+                <input
+                  ref={inputRef}
+                  type="text"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyDown={handleKeyPress}
+                  placeholder="Ask me anything in any language..."
+                  className="w-full px-4 py-3 pr-12 bg-stone-50 dark:bg-neutral-800 border border-stone-200 dark:border-neutral-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-neutral-900 dark:text-neutral-100"
                   disabled={isLoading}
-                >
-                  {isRecording ? (
-                    <div className="flex items-center gap-1">
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                />
+                
+                {/* Voice Input Button */}
+                {isVoiceSupported && (
+                  <button
+                    type="button"
+                    onClick={toggleVoiceRecognition}
+                    disabled={isLoading}
+                    className={`absolute right-2 top-1/2 transform -translate-y-1/2 p-2 rounded-xl transition-all duration-200 ${
+                      isRecording 
+                        ? 'bg-red-500 text-white animate-pulse' 
+                        : 'bg-stone-200 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-400 hover:bg-primary hover:text-white'
+                    }`}
+                    title={isRecording ? 'Stop recording' : 'Start voice input'}
+                  >
+                    {isRecording ? (
+                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
                         <rect x="6" y="6" width="12" height="12" rx="2"/>
                       </svg>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-1">
-                      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M12 1a3 3 0 00-3 3v7a3 3 0 006 0V4a3 3 0 00-3-3z"/>
-                        <path strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M19 10v1a7 7 0 01-14 0v-1M12 19v4m-4 0h8"/>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
                       </svg>
-                    </div>
-                  )}
-                </button>
-              )}
+                    )}
+                  </button>
+                )}
+              </div>
               
               <button
                 type="submit"
                 disabled={isLoading || !inputValue.trim()}
-                className="px-4 py-2 bg-primary hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl transition-all duration-200 flex items-center justify-center min-w-[44px] hover:scale-105"
+                className="bg-primary hover:bg-primary/90 disabled:bg-primary/50 disabled:cursor-not-allowed text-white px-4 py-3 rounded-2xl transition-all duration-200 flex items-center justify-center"
                 title="Send message"
               >
                 {isLoading ? (
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 714 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
                 ) : (
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                   </svg>
                 )}
               </button>
-            </div>
-
-            {/* Language Status Indicator */}
-            {isVoiceSupported && (
-              <div className="flex items-center justify-between mt-2 text-xs text-neutral-500 dark:text-neutral-400">
-                <div className="flex items-center gap-2">
-                  <span>Current voice language:</span>
-                  <span className="font-medium text-primary">
-                    {getLanguageInfo(recLang).flag} {getLanguageInfo(recLang).name}
-                  </span>
-                </div>
-                <div className="text-xs opacity-70">
-                  16+ languages supported
-                </div>
-              </div>
-            )}
-          </form>
+            </form>
+          </div>
         </div>
       )}
     </>
