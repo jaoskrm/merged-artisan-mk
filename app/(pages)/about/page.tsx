@@ -11,10 +11,13 @@ export default function About(): React.ReactNode {
   return (
     <div className="font-sans min-h-screen bg-white dark:bg-neutral-950">
       <Header />
-      <AboutHeroSection />
-      <AboutStorySection />
-      <AboutImpactSection />
-      <AboutTeamSection />
+      {/* ADD PT-20 WRAPPER TO FIX HEADER OVERLAP */}
+      <div className="pt-20">
+        <AboutHeroSection />
+        <AboutStorySection />
+        <AboutImpactSection />
+        <AboutTeamSection />
+      </div>
       <Footer />
     </div>
   );
