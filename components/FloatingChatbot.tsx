@@ -1,169 +1,305 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { 
+  MessageCircle, X, Trash2, Globe, Mic, MicOff, 
+  Volume2, VolumeX, Send, Loader2
+} from 'lucide-react';
 import { useChat } from '../hooks/useChat';
 import { useButtonHighlight } from '../hooks/useButtonHighlight';
 
-// Enhanced TS helpers for Web Speech API
+// Type definitions
 interface SpeechRecognitionEvent extends Event {
   results: SpeechRecognitionResultList;
   resultIndex: number;
-}
-
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-  message?: string;
 }
 
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
-  maxAlternatives: number;
   start(): void;
   stop(): void;
   onstart: ((this: SpeechRecognition, ev: Event) => any) | null;
   onend: ((this: SpeechRecognition, ev: Event) => any) | null;
   onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => any) | null;
-  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => any) | null;
+  onerror: ((this: SpeechRecognition, ev: Event) => any) | null;
 }
 
 declare global {
   interface Window {
-    webkitSpeechRecognition?: {
-      new (): SpeechRecognition;
-    };
-    SpeechRecognition?: {
-      new (): SpeechRecognition;
-    };
+    webkitSpeechRecognition?: { new (): SpeechRecognition };
+    SpeechRecognition?: { new (): SpeechRecognition };
   }
 }
 
+// Language configuration
+const LANGUAGES = [
+  { code: 'en-IN', name: 'English (India)', nativeName: 'English (भारत)', flag: '🇮🇳' },
+  { code: 'hi-IN', name: 'Hindi', nativeName: 'हिंदी', flag: '🇮🇳' },
+  { code: 'ta-IN', name: 'Tamil', nativeName: 'তমিজ়', flag: '🇮🇳' },
+  { code: 'bn-IN', name: 'Bengali', nativeName: 'বাংলা', flag: '🇮🇳' },
+  { code: 'te-IN', name: 'Telugu', nativeName: 'তেলুগু', flag: '🇮🇳' },
+  { code: 'mr-IN', name: 'Marathi', nativeName: 'मराठী', flag: '🇮🇳' },
+  { code: 'en-US', name: 'English (US)', nativeName: 'English (United States)', flag: '🇺🇸' },
+  { code: 'fr-FR', name: 'French', nativeName: 'Français', flag: '🇫🇷' },
+  { code: 'es-ES', name: 'Spanish', nativeName: 'Español', flag: '🇪🇸' },
+  { code: 'de-DE', name: 'German', nativeName: 'Deutsch', flag: '🇩🇪' },
+  { code: 'it-IT', name: 'Italian', nativeName: 'Italiano', flag: '🇮🇹' },
+  { code: 'pt-PT', name: 'Portuguese', nativeName: 'Português', flag: '🇵🇹' }
+];
+
 const FloatingChatbot = () => {
+  // States
   const [isOpen, setIsOpen] = useState(false);
+  const [showLanguageSelector, setShowLanguageSelector] = useState(false);
+  const [selectedLanguage, setSelectedLanguage] = useState<string | null>(null);
   const [inputValue, setInputValue] = useState('');
-  const { messages, isLoading, sendMessage, clearChat, dictateToChat } = useChat();
+  const [isRecording, setIsRecording] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isVoiceSupported, setIsVoiceSupported] = useState(false);
+  const [isTTSSupported, setIsTTSSupported] = useState(false);
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [isMobile, setIsMobile] = useState(false);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+  // Hooks
+  const { messages, isLoading, sendMessage, clearChat } = useChat();
   const { highlightButton, highlightMultipleButtons, startInteractiveGuide } = useButtonHighlight();
 
-  // Voice recognition states
-  const [isRecording, setIsRecording] = useState(false);
-  const [isVoiceSupported, setIsVoiceSupported] = useState(false);
-  const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const recognitionRef = useRef<SpeechRecognition | null>(null);
-  const [recLang, setRecLang] = useState('en-IN');
-  const [detectedLanguage, setDetectedLanguage] = useState<string | null>(null);
-
+  // Utilities
+  const getCurrentLanguage = () => LANGUAGES.find(lang => lang.code === selectedLanguage);
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
 
-  useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
+  const formatMessage = (content: string) => content
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/\n/g, '<br>');
 
-  useEffect(() => {
-    if (isOpen && inputRef.current) {
-      inputRef.current.focus();
+  // Cleanup function
+  const cleanupVoiceActivities = useCallback(() => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+      recognitionRef.current = null;
     }
-  }, [isOpen]);
+    if ('speechSynthesis' in window) speechSynthesis.cancel();
+    setIsRecording(false);
+    setIsSpeaking(false);
+  }, []);
 
-  // Enhanced voice support detection
+  // Mobile detection and menu state monitoring
   useEffect(() => {
-    const checkVoiceSupport = () => {
-      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      setIsVoiceSupported(!!SpeechRecognition);
+    const checkIfMobile = () => setIsMobile(window.innerWidth < 768);
+    const checkMobileMenuState = () => {
+      const isMenuOpen = document.body.style.overflow === 'hidden' || 
+                        document.querySelector('[class*="fixed"][class*="inset-0"][class*="bg-white"]') !== null;
+      setIsMobileMenuOpen(isMenuOpen);
     };
-    
-    checkVoiceSupport();
-    
-    // Cleanup on unmount
+
+    checkIfMobile();
+    checkMobileMenuState();
+
+    const resizeObserver = new ResizeObserver(checkIfMobile);
+    resizeObserver.observe(document.body);
+
+    const observer = new MutationObserver(checkMobileMenuState);
+    observer.observe(document.body, { 
+      attributes: true, 
+      attributeFilter: ['style', 'class'],
+      childList: true,
+      subtree: true 
+    });
+
     return () => {
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.stop();
-        } catch {}
-      }
+      resizeObserver.disconnect();
+      observer.disconnect();
     };
   }, []);
 
-  // Process AI response for button highlighting
-// Process AI response for button highlighting
-const processAIResponse = useCallback((content: string) => {
-  // Check if the response contains button highlighting instructions
-  const buttonHighlightRegex = /\[HIGHLIGHT_BUTTON:([^\]]+)\]/g;
-  const multiHighlightRegex = /\[HIGHLIGHT_SEQUENCE:([^\]]+)\]/g;
-  const interactiveGuideRegex = /\[INTERACTIVE_GUIDE:([^\]]+)\]/g;
-  
-  let processedContent = content;
-  let hasInteractiveGuide = false;
-  
-  // Process interactive guides first (highest priority)
-  let match;
-  while ((match = interactiveGuideRegex.exec(content)) !== null) {
-    const [fullMatch, instruction] = match;
-    hasInteractiveGuide = true;
-    
-    const steps = instruction.split(';').map(step => {
-      const [selector, message, delay] = step.split('|');
-      return {
-        selector: selector.trim(),
-        message: message?.trim() || 'Click here',
-        delay: parseInt(delay?.trim()) || 1000
-      };
-    });
-    
-    // Start interactive guide
-    setTimeout(() => {
-      startInteractiveGuide(steps);
-    }, 1000);
-    
-    // Remove the instruction from the content
-    processedContent = processedContent.replace(fullMatch, '');
-  }
-  
-  // Only process other highlighting if no interactive guide is present
-  if (!hasInteractiveGuide) {
-    // Process single button highlights
-    while ((match = buttonHighlightRegex.exec(content)) !== null) {
-      const [fullMatch, instruction] = match;
-      const [selector, message] = instruction.split('|');
-      
-      // Trigger highlight after a short delay
-      setTimeout(() => {
-        highlightButton(selector.trim(), { message: message?.trim() || 'Click here' });
-      }, 1000);
-      
-      // Remove the instruction from the content
-      processedContent = processedContent.replace(fullMatch, '');
+  // Effects
+  useEffect(() => scrollToBottom(), [messages]);
+  useEffect(() => {
+    if (isOpen && inputRef.current && !showLanguageSelector) inputRef.current.focus();
+  }, [isOpen, showLanguageSelector]);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    setIsVoiceSupported(!!SpeechRecognition);
+
+    if ('speechSynthesis' in window) {
+      setIsTTSSupported(true);
+      const loadVoices = () => setVoices(speechSynthesis.getVoices());
+      loadVoices();
+      if (speechSynthesis.onvoiceschanged !== undefined) {
+        speechSynthesis.onvoiceschanged = loadVoices;
+      }
     }
+
+    return cleanupVoiceActivities;
+  }, [cleanupVoiceActivities]);
+
+  useEffect(() => {
+    if (!isOpen) cleanupVoiceActivities();
+  }, [isOpen, cleanupVoiceActivities]);
+
+  // TTS functionality
+  const speakMessage = useCallback((text: string) => {
+    if (!isTTSSupported) return;
+
+    const cleanText = text.replace(/<[^>]*>/g, '').replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1');
     
-    // Process multiple button highlight sequences
-    while ((match = multiHighlightRegex.exec(content)) !== null) {
-      const [fullMatch, instruction] = match;
-      const buttons = instruction.split(';').map(btn => {
-        const [selector, message, delay] = btn.split('|');
+    if (isSpeaking) {
+      speechSynthesis.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+
+    const currentLang = getCurrentLanguage();
+    const preferredVoice = voices.find(voice => {
+      if (currentLang?.code.startsWith('en-')) {
+        return voice.lang.startsWith('en-') && (voice.name.includes('Google') || voice.name.includes('Microsoft') || voice.default);
+      }
+      return voice.lang === currentLang?.code || voice.lang.startsWith(currentLang?.code.split('-')[0] || '');
+    }) || voices.find(voice => voice.default);
+
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+    if (preferredVoice) utterance.voice = preferredVoice;
+    utterance.rate = 0.85;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    speechSynthesis.speak(utterance);
+  }, [isTTSSupported, voices, isSpeaking, getCurrentLanguage]);
+
+  // Process AI responses for button highlighting
+  const processAIResponse = useCallback((content: string) => {
+    const patterns = {
+      button: /\[HIGHLIGHT_BUTTON:([^\]]+)\]/g,
+      sequence: /\[HIGHLIGHT_SEQUENCE:([^\]]+)\]/g,
+      guide: /\[INTERACTIVE_GUIDE:([^\]]+)\]/g
+    };
+    
+    let processedContent = content;
+    let hasInteractiveGuide = false;
+    
+    let match;
+    while ((match = patterns.guide.exec(content)) !== null) {
+      hasInteractiveGuide = true;
+      const steps = match[1].split(';').map(step => {
+        const [selector, message, delay] = step.split('|');
         return {
           selector: selector.trim(),
           message: message?.trim() || 'Click here',
-          delay: parseInt(delay?.trim()) || 0
+          delay: parseInt(delay?.trim()) || 1000
         };
       });
-      
-      // Trigger highlight sequence after a short delay
-      setTimeout(() => {
-        highlightMultipleButtons(buttons);
-      }, 1000);
-      
-      // Remove the instruction from the content
-      processedContent = processedContent.replace(fullMatch, '');
+      setTimeout(() => startInteractiveGuide(steps), 1000);
+      processedContent = processedContent.replace(match[0], '');
     }
-  }
-  
-  return processedContent;
-}, [highlightButton, highlightMultipleButtons, startInteractiveGuide]);
+    
+    if (!hasInteractiveGuide) {
+      while ((match = patterns.button.exec(content)) !== null) {
+        const [selector, message] = match[1].split('|');
+        setTimeout(() => {
+          highlightButton(selector.trim(), { message: message?.trim() || 'Click here' });
+        }, 1000);
+        processedContent = processedContent.replace(match[0], '');
+      }
+      
+      while ((match = patterns.sequence.exec(content)) !== null) {
+        const buttons = match[1].split(';').map(btn => {
+          const [selector, message, delay] = btn.split('|');
+          return {
+            selector: selector.trim(),
+            message: message?.trim() || 'Click here',
+            delay: parseInt(delay?.trim()) || 0
+          };
+        });
+        setTimeout(() => highlightMultipleButtons(buttons), 1000);
+        processedContent = processedContent.replace(match[0], '');
+      }
+    }
+    
+    return processedContent;
+  }, [highlightButton, highlightMultipleButtons, startInteractiveGuide]);
 
+  // Voice recognition
+  const startVoiceRecognition = useCallback(() => {
+    if (!isVoiceSupported || !selectedLanguage) return;
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = selectedLanguage;
+
+    recognition.onstart = () => setIsRecording(true);
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const transcript = event.results[0][0].transcript.trim();
+      if (transcript) setInputValue(transcript);
+    };
+    recognition.onerror = () => setIsRecording(false);
+    recognition.onend = () => setIsRecording(false);
+
+    recognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch (error) {
+      setIsRecording(false);
+    }
+  }, [isVoiceSupported, selectedLanguage]);
+
+  const stopVoiceRecognition = useCallback(() => {
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch {}
+    }
+    setIsRecording(false);
+  }, []);
+
+  // Handlers
+  const handleOpenChat = () => {
+    setIsOpen(true);
+    if (!selectedLanguage) setShowLanguageSelector(true);
+  };
+
+  const handleCloseChat = () => {
+    cleanupVoiceActivities();
+    setIsOpen(false);
+  };
+
+  const handleCloseChatOrLanguageSelector = () => {
+    if (showLanguageSelector) {
+      if (selectedLanguage) {
+        setShowLanguageSelector(false);
+      } else {
+        handleCloseChat();
+      }
+    } else {
+      handleCloseChat();
+    }
+  };
+
+  const handleLanguageSelect = (langCode: string) => {
+    setSelectedLanguage(langCode);
+    setShowLanguageSelector(false);
+  };
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -171,372 +307,250 @@ const processAIResponse = useCallback((content: string) => {
 
     const message = inputValue;
     setInputValue('');
-    
-    // Send message and process response for highlighting
     const response = await sendMessage(message);
-    if (response) {
-      processAIResponse(response);
-    }
+    if (response) processAIResponse(response);
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend(e);
-    }
-  };
+  // Styles - UPDATED: Only show button on desktop, never on mobile
+  const shouldShowFloatingButton = !isOpen && !isMobile;
+  const chatWindowClasses = isMobile 
+    ? "fixed inset-0 bg-white dark:bg-neutral-900 z-50 flex flex-col"
+    : "fixed bottom-6 right-6 w-96 h-[600px] bg-white dark:bg-neutral-900 rounded-3xl shadow-2xl border border-neutral-200 dark:border-neutral-700 z-50 flex flex-col overflow-hidden animate-in slide-in-from-bottom-4 duration-300";
 
-  const formatMessage = (content: string) => {
-    return content
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/\n/g, '<br>');
-  };
+  const headerClasses = isMobile
+    ? "bg-gradient-to-r from-primary to-primary/90 text-white p-5 flex justify-between items-center"
+    : "bg-gradient-to-r from-primary to-primary/90 text-white p-5 flex justify-between items-center rounded-t-3xl";
 
-  // Enhanced permission checking
-  const requestMicPermission = async (): Promise<boolean> => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach(track => track.stop());
-      setHasPermission(true);
-      return true;
-    } catch (error) {
-      console.error('Mic permission denied:', error);
-      setHasPermission(false);
-      return false;
-    }
-  };
-
-  // Get language display info
-  const getLanguageInfo = (langCode: string) => {
-    const langMap: { [key: string]: { name: string; flag: string; region: string } } = {
-      'en-IN': { name: 'English (India)', flag: '🇮🇳', region: 'India' },
-      'en-US': { name: 'English (US)', flag: '🇺🇸', region: 'USA' },
-      'hi-IN': { name: 'हिंदी', flag: '🇮🇳', region: 'India' },
-      'ta-IN': { name: 'தமிழ்', flag: '🇮🇳', region: 'India' },
-      'bn-IN': { name: 'বাংলা', flag: '🇮🇳', region: 'India' },
-      'te-IN': { name: 'తెలుগు', flag: '🇮🇳', region: 'India' },
-      'mr-IN': { name: 'मराठी', flag: '🇮🇳', region: 'India' },
-      'gu-IN': { name: 'ગુજરાતી', flag: '🇮🇳', region: 'India' },
-      'kn-IN': { name: 'ಕನ್ನಡ', flag: '🇮🇳', region: 'India' },
-      'ml-IN': { name: 'മലയാളം', flag: '🇮🇳', region: 'India' },
-      'pa-IN': { name: 'ਪੰਜਾਬੀ', flag: '🇮🇳', region: 'India' },
-      'ur-IN': { name: 'اردو', flag: '🇮🇳', region: 'India' },
-      'fr-FR': { name: 'Français', flag: '🇫🇷', region: 'France' },
-      'de-DE': { name: 'Deutsch', flag: '🇩🇪', region: 'Germany' },
-      'es-ES': { name: 'Español', flag: '🇪🇸', region: 'Spain' },
-      'pt-PT': { name: 'Português', flag: '🇵🇹', region: 'Portugal' },
-      'it-IT': { name: 'Italiano', flag: '🇮🇹', region: 'Italy' }
-    };
-    return langMap[langCode] || { name: langCode, flag: '🌐', region: 'Global' };
-  };
-
-  // Voice recognition setup
-  const startVoiceRecognition = async () => {
-    if (!isVoiceSupported) {
-      alert('Voice recognition is not supported in your browser.');
-      return;
-    }
-
-    if (hasPermission === null) {
-      const granted = await requestMicPermission();
-      if (!granted) return;
-    }
-
-    if (hasPermission === false) {
-      alert('Microphone permission is required for voice input.');
-      return;
-    }
-
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    const recognition = new SpeechRecognition();
-    
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = recLang;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => {
-      setIsRecording(true);
-      console.log(`🎤 Voice recognition started (${recLang})`);
-    };
-
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = event.results[0][0].transcript;
-      const confidence = event.results[0][0].confidence;
-      
-      console.log(`🎤 Voice input: "${transcript}" (confidence: ${confidence})`);
-      setInputValue(transcript);
-      
-      // Auto-detect language from speech result
-      if (confidence > 0.7) {
-        setDetectedLanguage(recLang);
-      }
-    };
-
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      console.error('🎤 Voice recognition error:', event.error);
-      setIsRecording(false);
-      
-      let errorMessage = 'Voice recognition failed: ';
-      switch (event.error) {
-        case 'no-speech':
-          errorMessage += 'No speech detected. Please try again.';
-          break;
-        case 'audio-capture':
-          errorMessage += 'Audio capture failed. Check your microphone.';
-          break;
-        case 'not-allowed':
-          errorMessage += 'Microphone permission denied.';
-          setHasPermission(false);
-          break;
-        default:
-          errorMessage += event.error;
-      }
-      alert(errorMessage);
-    };
-
-    recognition.onend = () => {
-      setIsRecording(false);
-      console.log('🎤 Voice recognition ended');
-    };
-
-    recognitionRef.current = recognition;
-    recognition.start();
-  };
-
-  const stopVoiceRecognition = () => {
-    if (recognitionRef.current) {
-      recognitionRef.current.stop();
-    }
-    setIsRecording(false);
-  };
-
-  const toggleVoiceRecognition = () => {
-    if (isRecording) {
-      stopVoiceRecognition();
-    } else {
-      startVoiceRecognition();
-    }
-  };
-
-  // Available voice recognition languages
-  const getVoiceRecognitionLanguages = () => [
-    { code: 'en-IN', name: 'English (India)', flag: '🇮🇳' },
-    { code: 'en-US', name: 'English (US)', flag: '🇺🇸' },
-    { code: 'hi-IN', name: 'हिंदी', flag: '🇮🇳' },
-    { code: 'ta-IN', name: 'தமிழ்', flag: '🇮🇳' },
-    { code: 'bn-IN', name: 'বাংলা', flag: '🇮🇳' },
-    { code: 'te-IN', name: 'తెలుగు', flag: '🇮🇳' },
-    { code: 'mr-IN', name: 'मराठी', flag: '🇮🇳' },
-    { code: 'gu-IN', name: 'ગુજરાતી', flag: '🇮🇳' },
-    { code: 'kn-IN', name: 'ಕನ್ನಡ', flag: '🇮🇳' },
-    { code: 'ml-IN', name: 'മലയാളം', flag: '🇮🇳' },
-    { code: 'pa-IN', name: 'ਪੰਜਾਬੀ', flag: '🇮🇳' },
-    { code: 'ur-IN', name: 'اردو', flag: '🇮🇳' },
-    { code: 'fr-FR', name: 'Français', flag: '🇫🇷' },
-    { code: 'de-DE', name: 'Deutsch', flag: '🇩🇪' },
-    { code: 'es-ES', name: 'Español', flag: '🇪🇸' },
-    { code: 'pt-PT', name: 'Português', flag: '🇵🇹' },
-    { code: 'it-IT', name: 'Italiano', flag: '🇮🇹' }
-  ];
+  const inputSectionClasses = isMobile
+    ? "border-t border-neutral-200 dark:border-neutral-700 p-4 bg-white dark:bg-neutral-900"
+    : "border-t border-neutral-200 dark:border-neutral-700 p-4 bg-white dark:bg-neutral-900 rounded-b-3xl";
 
   return (
     <>
-      {/* Floating Chat Button */}
-      <div className="fixed bottom-6 right-6 z-50">
+      {/* Floating Chat Button - DESKTOP ONLY */}
+      {shouldShowFloatingButton && (
         <button
-          onClick={() => setIsOpen(!isOpen)}
-          className={`
-            relative w-16 h-16 rounded-full shadow-lg transition-all duration-300 ease-in-out
-            ${isOpen 
-              ? 'bg-red-500 hover:bg-red-600 transform rotate-45' 
-              : 'bg-primary hover:bg-primary/90 transform rotate-0'
-            }
-            flex items-center justify-center text-white font-bold text-xl
-            hover:scale-110 focus:outline-none focus:ring-4 focus:ring-primary/30
-          `}
-          aria-label={isOpen ? 'Close chat' : 'Open chat'}
+          onClick={handleOpenChat}
+          className="fixed bottom-6 right-6 w-16 h-16 bg-gradient-to-br from-primary to-primary/80 hover:from-primary/90 hover:to-primary rounded-full shadow-2xl z-50 flex items-center justify-center transition-all duration-300 hover:scale-110"
+          aria-label="Open Artisans AI chat"
         >
-          {isOpen ? (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          ) : (
-            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-            </svg>
-          )}
-          
-          <div className="absolute -top-1 -right-1 w-5 h-5 bg-orange-500 rounded-full flex items-center justify-center">
+          <MessageCircle className="w-7 h-7 text-white" />
+          <div className="absolute -top-2 -right-2 w-6 h-6 bg-orange-500 rounded-full flex items-center justify-center">
             <span className="text-xs font-bold text-white">AI</span>
           </div>
         </button>
-      </div>
+      )}
 
       {/* Chat Window */}
       {isOpen && (
-        <div className="fixed bottom-24 right-6 w-96 h-[560px] bg-white dark:bg-neutral-900 rounded-2xl shadow-2xl border border-stone-200 dark:border-neutral-800 z-40 flex flex-col overflow-hidden">
-          {/* Enhanced Header */}
-          <div className="bg-gradient-to-r from-primary to-primary/80 text-white p-4 flex justify-between items-center">
-            <div className="flex items-center gap-3">
-              <div className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                </svg>
-              </div>
-              <div>
-                <h3 className="font-bold text-sm">🌐 Multilingual AI Assistant</h3>
-                <p className="text-xs opacity-90">16+ Languages • Artisans Marketplace</p>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={clearChat}
-                className="p-1 hover:bg-white/20 rounded transition-colors"
-                title="Clear chat"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-              </button>
-              <button
-                onClick={() => setIsOpen(false)}
-                className="p-1 hover:bg-white/20 rounded transition-colors"
-                title="Close chat"
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {messages.map((message) => (
-              <div
-                key={message.id}
-                className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                <div
-                  className={`
-                    max-w-[80%] rounded-2xl px-4 py-2 break-words
-                    ${message.role === 'user'
-                      ? 'bg-primary text-white rounded-br-md'
-                      : 'bg-stone-100 dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-bl-md'
-                    }
-                  `}
-                >
-                  <div
-                    className="text-sm leading-relaxed"
-                    dangerouslySetInnerHTML={{ __html: formatMessage(message.content) }}
-                  />
-                  <div className={`text-xs mt-1 opacity-70 ${message.role === 'user' ? 'text-white/70' : 'text-neutral-500'}`}>
-                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        <div className={chatWindowClasses}>
+          {/* Language Selector OR Main Chat */}
+          {showLanguageSelector ? (
+            <>
+              {/* Language Selector Header */}
+              <div className={headerClasses}>
+                <div className="flex items-center gap-3">
+                  <Globe className="w-6 h-6" />
+                  <div>
+                    <h3 className="font-bold text-lg">Choose Language</h3>
+                    <p className="text-sm opacity-90">Select your preferred language</p>
                   </div>
                 </div>
-              </div>
-            ))}
-            
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="bg-stone-100 dark:bg-neutral-800 rounded-2xl rounded-bl-md px-4 py-3">
-                  <div className="flex space-x-1">
-                    <div className="w-2 h-2 bg-neutral-400 rounded-full animate-bounce"></div>
-                    <div className="w-2 h-2 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                    <div className="w-2 h-2 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                  </div>
-                </div>
-              </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-
-          {/* Enhanced Input Section */}
-          <div className="border-t border-stone-200 dark:border-neutral-800 p-4">
-            {/* Voice Recognition Language Selector */}
-            {isVoiceSupported && (
-              <div className="mb-3">
-                <select
-                  value={recLang}
-                  onChange={(e) => setRecLang(e.target.value)}
-                  className="text-xs bg-stone-50 dark:bg-neutral-800 border border-stone-200 dark:border-neutral-700 rounded-lg px-2 py-1 text-neutral-700 dark:text-neutral-300 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                {/* Always show close button on language selector */}
+                <button
+                  onClick={handleCloseChatOrLanguageSelector}
+                  className="p-2 hover:bg-white/20 rounded-xl transition-colors"
+                  aria-label="Close language selector"
                 >
-                  {getVoiceRecognitionLanguages().map(lang => (
-                    <option key={lang.code} value={lang.code}>
-                      {lang.flag} {lang.name}
-                    </option>
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Language Options */}
+              <div className="flex-1 p-4 overflow-y-auto">
+                <div className="grid gap-2">
+                  {LANGUAGES.map((language) => (
+                    <button
+                      key={language.code}
+                      onClick={() => handleLanguageSelect(language.code)}
+                      className="flex items-center gap-3 p-4 bg-neutral-50 dark:bg-neutral-800 hover:bg-primary/10 dark:hover:bg-primary/20 rounded-xl transition-all group"
+                    >
+                      <span className="text-2xl">{language.flag}</span>
+                      <div className="flex-1 text-left">
+                        <div className="font-semibold text-base text-neutral-900 dark:text-neutral-100 group-hover:text-primary">
+                          {language.name}
+                        </div>
+                        <div className="text-sm text-neutral-500 dark:text-neutral-400">
+                          {language.nativeName}
+                        </div>
+                      </div>
+                    </button>
                   ))}
-                </select>
-                {detectedLanguage && (
-                  <span className="ml-2 text-xs text-primary">
-                    🎯 {getLanguageInfo(detectedLanguage).name}
-                  </span>
-                )}
+                </div>
               </div>
-            )}
-
-            <form onSubmit={handleSend} className="flex gap-2">
-              <div className="flex-1 relative">
-                <input
-                  ref={inputRef}
-                  type="text"
-                  value={inputValue}
-                  onChange={(e) => setInputValue(e.target.value)}
-                  onKeyDown={handleKeyPress}
-                  placeholder="Ask me anything in any language..."
-                  className="w-full px-4 py-3 pr-12 bg-stone-50 dark:bg-neutral-800 border border-stone-200 dark:border-neutral-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-neutral-900 dark:text-neutral-100"
-                  disabled={isLoading}
-                />
-                
-                {/* Voice Input Button */}
-                {isVoiceSupported && (
+            </>
+          ) : selectedLanguage && (
+            <>
+              {/* Main Chat Header */}
+              <div className={headerClasses}>
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-white/20 backdrop-blur rounded-full flex items-center justify-center">
+                    <span className="text-lg">{getCurrentLanguage()?.flag}</span>
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-lg">Artisans AI</h3>
+                    <p className="text-sm opacity-90">{getCurrentLanguage()?.name}</p>
+                  </div>
+                </div>
+                <div className="flex gap-1">
                   <button
-                    type="button"
-                    onClick={toggleVoiceRecognition}
-                    disabled={isLoading}
-                    className={`absolute right-2 top-1/2 transform -translate-y-1/2 p-2 rounded-xl transition-all duration-200 ${
-                      isRecording 
-                        ? 'bg-red-500 text-white animate-pulse' 
-                        : 'bg-stone-200 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-400 hover:bg-primary hover:text-white'
-                    }`}
-                    title={isRecording ? 'Stop recording' : 'Start voice input'}
+                    onClick={() => setShowLanguageSelector(true)}
+                    className="p-2 hover:bg-white/20 rounded-xl transition-colors"
+                    title="Change language"
+                    aria-label="Change language"
                   >
-                    {isRecording ? (
-                      <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-                        <rect x="6" y="6" width="12" height="12" rx="2"/>
-                      </svg>
-                    ) : (
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-                      </svg>
-                    )}
+                    <Globe className="w-4 h-4" />
                   </button>
-                )}
+                  <button
+                    onClick={clearChat}
+                    className="p-2 hover:bg-white/20 rounded-xl transition-colors"
+                    title="Clear chat"
+                    aria-label="Clear chat"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={handleCloseChat}
+                    className="p-2 hover:bg-white/20 rounded-xl transition-colors"
+                    title="Close chat"
+                    aria-label="Close chat"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
-              
-              <button
-                type="submit"
-                disabled={isLoading || !inputValue.trim()}
-                className="bg-primary hover:bg-primary/90 disabled:bg-primary/50 disabled:cursor-not-allowed text-white px-4 py-3 rounded-2xl transition-all duration-200 flex items-center justify-center"
-                title="Send message"
-              >
-                {isLoading ? (
-                  <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 714 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                ) : (
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                  </svg>
+
+              {/* Messages */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-gradient-to-b from-neutral-50 to-white dark:from-neutral-900 dark:to-neutral-800">
+                {messages.length === 0 && (
+                  <div className="text-center py-8">
+                    <div className="w-16 h-16 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <span className="text-2xl">{getCurrentLanguage()?.flag}</span>
+                    </div>
+                    <h4 className="font-semibold text-neutral-700 dark:text-neutral-300 mb-2">
+                      Welcome to Artisans AI!
+                    </h4>
+                    <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                      I'm ready to help you in {getCurrentLanguage()?.name}. Ask me anything about our marketplace or artisan services.
+                    </p>
+                  </div>
                 )}
-              </button>
-            </form>
-          </div>
+
+                {messages.map((message) => (
+                  <div key={message.id} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] rounded-2xl px-4 py-3 ${
+                      message.role === 'user'
+                        ? 'bg-primary text-white rounded-br-md shadow-md'
+                        : 'bg-white dark:bg-neutral-800 text-neutral-900 dark:text-neutral-100 rounded-bl-md shadow-md border border-neutral-100 dark:border-neutral-700'
+                    }`}>
+                      <div className="flex items-start gap-2">
+                        <div
+                          className="text-sm leading-relaxed flex-1"
+                          dangerouslySetInnerHTML={{ __html: formatMessage(message.content) }}
+                        />
+                        {/* TTS Button for AI messages */}
+                        {message.role === 'assistant' && isTTSSupported && (
+                          <button
+                            onClick={() => speakMessage(message.content)}
+                            className={`ml-2 p-1 rounded-lg transition-colors flex-shrink-0 ${
+                              isSpeaking 
+                                ? 'bg-primary/20 text-primary' 
+                                : 'bg-neutral-100 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200 dark:hover:bg-neutral-600'
+                            }`}
+                            title={isSpeaking ? 'Stop speaking' : 'Read aloud'}
+                            aria-label={isSpeaking ? 'Stop speaking' : 'Read aloud'}
+                          >
+                            {isSpeaking ? <VolumeX className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                          </button>
+                        )}
+                      </div>
+                      <div className={`text-xs mt-2 opacity-60 ${message.role === 'user' ? 'text-white/70' : 'text-neutral-400'}`}>
+                        {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                
+                {isLoading && (
+                  <div className="flex justify-start">
+                    <div className="bg-white dark:bg-neutral-800 rounded-2xl rounded-bl-md px-4 py-3 border border-neutral-100 dark:border-neutral-700">
+                      <div className="flex space-x-1">
+                        {[0, 1, 2].map((i) => (
+                          <div
+                            key={i}
+                            className="w-2 h-2 bg-primary rounded-full animate-bounce"
+                            style={{ animationDelay: `${i * 0.1}s` }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
+
+              {/* Input Section */}
+              <div className={inputSectionClasses}>
+                <form onSubmit={handleSend} className="flex gap-3">
+                  <div className="flex-1 relative">
+                    <input
+                      ref={inputRef}
+                      type="text"
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSend(e);
+                        }
+                      }}
+                      placeholder={`Type your message in ${getCurrentLanguage()?.name}...`}
+                      className="w-full px-4 py-3 pr-12 bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-all text-neutral-900 dark:text-neutral-100 placeholder-neutral-400"
+                      disabled={isLoading}
+                    />
+                    
+                    {/* Voice Button */}
+                    {isVoiceSupported && (
+                      <button
+                        type="button"
+                        onClick={isRecording ? stopVoiceRecognition : startVoiceRecognition}
+                        disabled={isLoading}
+                        className={`absolute right-2 top-1/2 transform -translate-y-1/2 p-2 rounded-xl transition-all duration-200 ${
+                          isRecording 
+                            ? 'bg-red-500 text-white animate-pulse scale-110' 
+                            : 'bg-neutral-200 dark:bg-neutral-700 text-neutral-600 dark:text-neutral-400 hover:bg-primary hover:text-white hover:scale-105'
+                        }`}
+                        title={isRecording ? 'Stop recording' : 'Start voice input'}
+                        aria-label={isRecording ? 'Stop recording' : 'Start voice input'}
+                      >
+                        {isRecording ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                      </button>
+                    )}
+                  </div>
+                  
+                  <button
+                    type="submit"
+                    disabled={isLoading || !inputValue.trim()}
+                    className="bg-gradient-to-r from-primary to-primary/90 hover:from-primary/90 hover:to-primary disabled:from-primary/50 disabled:to-primary/50 disabled:cursor-not-allowed text-white px-5 py-3 rounded-2xl transition-all duration-200 flex items-center justify-center shadow-md hover:shadow-lg hover:scale-105 disabled:hover:scale-100"
+                    title="Send message"
+                    aria-label="Send message"
+                  >
+                    {isLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Send className="w-5 h-5" />}
+                  </button>
+                </form>
+              </div>
+            </>
+          )}
         </div>
       )}
     </>
